@@ -4,12 +4,14 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
 const val PREFS = "shortsguard"
 const val KEY_YT = "block_youtube_shorts"
 const val KEY_IG = "block_instagram_reels"
+const val KEY_IG_LOCK = "lock_instagram_home"
 
 private const val YT = "com.google.android.youtube"
 private const val IG = "com.instagram.android"
@@ -23,6 +25,7 @@ private class Scan {
     var reelsTabSelected = false
     var searchTabSelected = false
     val reelRects = ArrayList<Rect>() // reels visible inline in a feed
+    var feedList: AccessibilityNodeInfo? = null // the big vertical scrolling list
 }
 
 class BlockerService : AccessibilityService() {
@@ -30,6 +33,7 @@ class BlockerService : AccessibilityService() {
     private var lastAction = 0L
     private val recent = ArrayDeque<Long>()
     private var pausedUntil = 0L
+    private var lastSnap = 0L
 
     private var lastDmSeen = 0L
     private var friendReelActive = false
@@ -44,7 +48,11 @@ class BlockerService : AccessibilityService() {
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         when (e.packageName?.toString()) {
             YT -> if (prefs.getBoolean(KEY_YT, false)) handleYouTube()
-            IG -> if (prefs.getBoolean(KEY_IG, false)) handleInstagram(e)
+            IG -> {
+                val blockReels = prefs.getBoolean(KEY_IG, false)
+                val lockFeed = prefs.getBoolean(KEY_IG_LOCK, false)
+                if (blockReels || lockFeed) handleInstagram(e, blockReels, lockFeed)
+            }
             else -> friendReelActive = false
         }
     }
@@ -94,9 +102,20 @@ class BlockerService : AccessibilityService() {
     }
 
     // ---------- Instagram ----------
-    private fun handleInstagram(event: AccessibilityEvent) {
+    private fun handleInstagram(event: AccessibilityEvent, blockReels: Boolean, lockFeed: Boolean) {
         val s = scan() ?: return
         val now = System.currentTimeMillis()
+
+        val onHomeFeed = s.homeSelected ||
+            s.ids.any { it == "reels_tray_container" || it.startsWith("reel_tray") }
+
+        // Lock: the Home feed can't be scrolled down. It snaps back to the top.
+        if (lockFeed && onHomeFeed && !s.reelsTabSelected && !s.searchTabSelected && isScrollDown(event)) {
+            snapToTop(s)
+            return
+        }
+
+        if (!blockReels) return
 
         val inDm = s.ids.any { it.startsWith("direct_thread") || it.startsWith("row_thread_composer") }
         if (inDm) lastDmSeen = now
@@ -109,8 +128,9 @@ class BlockerService : AccessibilityService() {
             return
         }
 
-        // Home feed: scroll past any reel that shows up, so only posts are left
-        if (s.homeSelected && s.reelRects.isNotEmpty()) {
+        // Home feed: scroll past any reel that shows up, so only posts are left.
+        // (Skipped when the feed is locked, because the lock holds it at the top.)
+        if (!lockFeed && s.homeSelected && s.reelRects.isNotEmpty()) {
             skipReel(s.reelRects.maxByOrNull { it.height() }!!)
             return
         }
@@ -131,7 +151,7 @@ class BlockerService : AccessibilityService() {
                 friendReelActive = true
                 friendReelStart = now
             } else {
-                // Reel opened from a profile, feed, etc.: block
+                // Reel opened from a profile, etc.: block
                 back()
             }
             return
@@ -147,6 +167,20 @@ class BlockerService : AccessibilityService() {
     }
 
     // ---------- Helpers ----------
+    private fun isScrollDown(e: AccessibilityEvent): Boolean {
+        if (e.eventType != AccessibilityEvent.TYPE_VIEW_SCROLLED) return false
+        return if (Build.VERSION.SDK_INT >= 28) e.scrollDeltaY > 0 else e.scrollY > 0
+    }
+
+    /** Pushes the Home feed back to the very top. */
+    private fun snapToTop(s: Scan) {
+        val now = System.currentTimeMillis()
+        if (now - lastSnap < 120) return
+        lastSnap = now
+        val list = s.feedList ?: return
+        repeat(4) { list.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) }
+    }
+
     /** Swipes the feed up just far enough to push the reel off the top of the screen. */
     private fun skipReel(reel: Rect) {
         val h = resources.displayMetrics.heightPixels
@@ -212,6 +246,7 @@ class BlockerService : AccessibilityService() {
         val screenH = resources.displayMetrics.heightPixels
         val r = Rect()
         var count = 0
+        var feedBest = 0
 
         fun walk(n: AccessibilityNodeInfo?, depth: Int) {
             if (n == null || depth > 40 || count > 1500) return
@@ -228,6 +263,14 @@ class BlockerService : AccessibilityService() {
             if (s.miniClose == null &&
                 (desc.contains("Close miniplayer", true) || id.contains("floaty_bar_close"))
             ) s.miniClose = n
+
+            if (n.isScrollable) {
+                n.getBoundsInScreen(r)
+                if (r.height() > screenH * 0.4f && r.height() > feedBest) {
+                    feedBest = r.height()
+                    s.feedList = n
+                }
+            }
 
             if (desc.startsWith("Reel by", true)) {
                 n.getBoundsInScreen(r)
