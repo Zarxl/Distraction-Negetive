@@ -62,7 +62,7 @@ class MainActivity : Activity() {
                 "If Android says \"Restricted setting\", go to Settings > Apps > ShortsGuard > ⋮ menu > " +
                 "Allow restricted settings, then try again.\n\n" +
                 "YouTube: opening a Short sends you to the Home tab.\n" +
-                "Instagram: Reels opened from the Reels tab, feed or Explore send you to the Home tab. " +
+                "Instagram: the Reels tab and Search/Explore tab send you to Home. Reels opened from a profile are blocked. Reels that show up in your Home feed get scrolled past. " +
                 "A reel a friend sent in chat opens normally, but swiping to the next reel sends you back to the chat."
         })
 
